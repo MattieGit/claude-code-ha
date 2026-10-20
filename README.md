@@ -14,11 +14,14 @@ CLI tools and configuration for using [Claude Code](https://claude.com/claude-co
 
 ## Prerequisites
 
-### Terminal & SSH Add-on Setup
+### SSH Add-on Setup
 
-Install the "Terminal & SSH" add-on from the Home Assistant Add-on Store, then configure it with the required packages:
+Install the **Advanced SSH & Web Terminal** add-on (community add-ons repository) — it is the one
+whose `init_commands` keep Claude alive across updates (see *After Home Assistant OS Updates*).
+The official "Terminal & SSH" add-on also works for a one-off install, but has no `init_commands`.
+Configure it with the required packages:
 
-1. Go to **Settings → Add-ons → Terminal & SSH → Configuration**
+1. Go to **Settings → Add-ons → Advanced SSH & Web Terminal → Configuration**
 2. Add these packages to the configuration:
 
 ```yaml
@@ -74,10 +77,9 @@ pip3 install websockets --break-system-packages
 # Install Claude Code
 npm install -g @anthropic-ai/claude-code
 
-# Copy scripts to PATH
-cp bin/* /usr/local/bin/
-chmod +x /usr/local/bin/ha-*
-chmod +x /usr/local/bin/lovelace-sync
+# Link scripts into PATH (install.sh symlinks, so a git pull updates them)
+chmod +x bin/*
+ln -sf "$PWD"/bin/* /usr/local/bin/
 
 # Copy CLAUDE.md and .env to your HA config directory
 cp CLAUDE.md /config/
@@ -99,6 +101,7 @@ ha-api attr sensor.temperature   # Show attributes
 ha-api devices motion            # Find by device_class
 ha-api search bedroom            # Search entity IDs
 ha-api call light turn_on        # Call a service
+ha-api call light turn_on '{"entity_id":"light.kitchen"}'  # ...with a JSON body
 ha-api history sensor.temp 48    # Get 48h history
 ```
 
@@ -120,18 +123,41 @@ ha-ws device get <device_id>     # Device details + all entities
 ha-ws area list                  # List areas
 ha-ws area create "Guest Room"   # Create area
 
-# Service calls
+# Area management (continued)
+ha-ws area update kitchen icon=mdi:stove   # Update area
+ha-ws area delete guest_room               # Delete area
+
+# States and service calls
+ha-ws state sensor.temperature
+ha-ws states light               # Optional domain filter
+ha-ws services light             # List services
 ha-ws call light.turn_on entity_id=light.kitchen brightness=255
+
+# Search & inspect
+ha-ws search kitchen             # Search related entities
+ha-ws related light.kitchen      # Automations/scenes/devices that use it
+
+# System
+ha-ws config                     # HA configuration
+ha-ws info                       # HA core info
 
 # Raw WebSocket
 ha-ws raw config/entity_registry/list
 ha-ws raw config/entity_registry/get entity_id=light.kitchen   # key=value params
 ha-ws raw config_entries/ignore_flow '{"flow_id":"X","title":"Y"}'   # or a JSON object
+
+# Batch: one command per line on stdin
+printf 'entity get light.a\nentity get light.b\n' | ha-ws batch
+
+# Options: --json (raw JSON output), --quiet (minimal output)
+ha-ws --json entity get light.kitchen
 ```
 
 ### lovelace-sync - Dashboard Sync
 
-Edit `.storage/lovelace` directly, then push to HA:
+Edit `.storage/lovelace` directly, then push to HA. Only the **default** dashboard
+(`.storage/lovelace`) is pushed; extra dashboards (`.storage/lovelace.<name>`) need a
+`lovelace/config/save` WebSocket call with their `url_path`.
 
 ```bash
 # 1. Edit the lovelace file
@@ -196,35 +222,60 @@ HA_TOKEN=your_token_here
 
 ## After Home Assistant OS Updates
 
-HA OS updates reset the root filesystem, removing installed packages and PATH modifications. **Re-run `install.sh` after each HA OS update:**
+HA Core / Supervisor / add-on updates rebuild the add-on container, wiping the
+root filesystem (`/root`, `/usr/local`) — so the `claude` binary and your login
+are lost. This is now handled **automatically**: `install.sh` is wired into the
+SSH add-on's `init_commands`, so it runs on every add-on start, *before* you open
+a terminal.
 
-```bash
-cd /config/claude-code-ha  # or wherever you cloned it
-./install.sh
+To set that up (one time), add this to **Settings → Add-ons → Advanced SSH &
+Web Terminal → Configuration → `init_commands`**:
+
+```yaml
+init_commands:
+  - bash /config/claude-code-ha/install.sh >> /config/claude-code-ha/install.log 2>&1 || true
 ```
 
-### What install.sh Does
+After an update you should *not* have to reinstall Claude or log in again.
 
-| Item | Action | On Re-run |
-|------|--------|-----------|
-| System packages (python3, nodejs, etc.) | Installs via apk | Reinstalls (needed after HA update) |
-| Python websockets | pip install | Reinstalls (needed after HA update) |
-| Claude Code | npm install -g | Reinstalls (needed after HA update) |
-| `ha-api`, `ha-ws`, `lovelace-sync` | **Symlinks** to repo's `bin/` | Recreates (safe) |
-| `CLAUDE.md` | **Copies** to `/config/` | Skips if exists (preserves customizations) |
-| `.env` | **Copies** template to `/config/.env` | Skips if exists (preserves your token) |
-| PATH in `/etc/profile.d/` | Creates | Recreates (needed after HA update) |
+### What install.sh Does (idempotent — safe to run every start)
 
-**Symlinks** point to the scripts in the repo - updates to the repo are immediately available.
-
-**Copies** are only made on first run. If you've customized `CLAUDE.md`, it won't be overwritten. To get updates, manually copy from the repo.
+| Item | Action |
+|------|--------|
+| System packages (python3, nodejs, etc.) | Installs via apk **only if missing** |
+| Python websockets | pip install **only if missing** |
+| Claude Code | `npm install -g` **only if the binary is gone** (after a rebuild) |
+| `~/.claude` + `~/.claude.json` (login + memory) | **Symlinks** to `/config/.claude` so they persist; migrates existing data on first run |
+| Memory | Restores `*.md` from `/config/.claude-memory-backup` into `~/.claude/projects/-homeassistant/memory` only if that dir is empty |
+| `ha-api`, `ha-ws`, `lovelace-sync` | **Symlinks** to repo's `bin/` |
+| `CLAUDE.md` / `.env` | **Copies** to `/config/` only if absent (preserves customizations) |
+| PATH in `/etc/profile.d/` | Recreated |
 
 ### What Persists Across HA Updates
 
-These survive in `/config`:
+These survive in `/config` (the HA config partition, also in HA backups):
 - The cloned repo itself
+- **Your Claude login + memory** (`/config/.claude` + `/config/.claude.json`)
 - Your `.env` file (with your token)
 - Your customized `CLAUDE.md`
+
+### What Does NOT Persist
+
+Anything else under `/root` is wiped on every add-on rebuild (add-on, Supervisor or
+Core update). Known cases:
+
+- **`~/.tmux.conf`** — a plain file, not managed by `install.sh`. Contains the
+  terminal add-on's defaults plus `set -g set-clipboard on` (added 2026-09-12 so
+  tmux copies reach the system clipboard). Re-add that line after a rebuild, or move
+  the file to `/config` and symlink it from `install.sh` if it keeps getting lost.
+- **`~/.ssh/config`** — wiped like the rest, but `install.sh` re-creates the SSH
+  connection-reuse block (ControlMaster for the hosts in its `Host` line — replace the
+  `SERVER_SUBNET.*` / `ROUTER_IP` placeholders in `install.sh` with your own) when no
+  ControlMaster block is present. Useful when a router's IPS blocks bursts of new
+  SSH connections from HA to other hosts on your network.
+- **`~/.zshrc`** — written by the add-on. It aliases `tmux` to the oh-my-zsh tmux
+  plugin wrapper, which only exists in interactive shells; scripts and Claude's Bash
+  tool must call `command tmux` or `/usr/bin/tmux`.
 
 ## Requirements
 

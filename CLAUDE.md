@@ -9,6 +9,8 @@ When searching, check all yaml files in `/config/*.yaml` and the packages folder
 
 Configurations and automations should be in self-contained files in the packages/ folder.
 
+**Never put `#` comments in `automations.yaml`.** It belongs to the UI editor, which rewrites the file and strips every comment on save. Put the reasoning in the automation `description:` and in `alias:` fields on triggers, conditions and actions instead. Comments in packages/ are fine.
+
 ## Getting Entity/Device Information
 
 **Prefer `ha-ws` for detailed lookups** - it provides full context:

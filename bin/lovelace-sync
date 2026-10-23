@@ -61,8 +61,35 @@ def load_env(env_file):
                 os.environ[key] = value
 
 
+def dashboard_url_path(lovelace_file):
+    """Map a storage file to its dashboard url_path (None = default dashboard).
+
+    .storage/lovelace is the default dashboard; .storage/lovelace.<id> belongs to
+    the dashboard with that id in .storage/lovelace_dashboards. Without this the
+    save always lands on the default dashboard and overwrites it.
+    """
+    name = os.path.basename(lovelace_file)
+    if name == 'lovelace':
+        return None
+    if not name.startswith('lovelace.'):
+        raise ValueError(f"{name} is not a lovelace storage file")
+    dash_id = name[len('lovelace.'):]
+    registry = os.path.join(os.path.dirname(lovelace_file), 'lovelace_dashboards')
+    with open(registry, 'r') as f:
+        items = json.load(f).get('data', {}).get('items', [])
+    for item in items:
+        if item.get('id') == dash_id:
+            return item['url_path']
+    raise ValueError(f"No dashboard with id '{dash_id}' in {registry}")
+
+
 async def sync_lovelace(lovelace_file):
     """Push lovelace config to Home Assistant."""
+    try:
+        url_path = dashboard_url_path(lovelace_file)
+    except (OSError, ValueError) as e:
+        print(f"Error: {e}")
+        return False
     token = os.environ.get('HA_TOKEN')
     url = os.environ.get('HA_URL', 'https://172.30.32.1:8128')
 
@@ -109,12 +136,15 @@ async def sync_lovelace(lovelace_file):
             return False
 
         # Send lovelace save command
-        print("Pushing config to Home Assistant...")
-        await ws.send(json.dumps({
+        print(f"Pushing config to dashboard '{url_path or 'default'}'...")
+        save = {
             "id": 1,
             "type": "lovelace/config/save",
             "config": config
-        }))
+        }
+        if url_path:
+            save["url_path"] = url_path
+        await ws.send(json.dumps(save))
 
         # Wait for result
         msg = json.loads(await ws.recv())
